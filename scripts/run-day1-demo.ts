@@ -9,7 +9,7 @@ console.log(`[Auto-Heal-MCP Day 1 Demo] Running mode: ${chaosMode}`);
 console.log(`======================================================\n`);
 
 // Run Playwright test; do NOT crash on non-zero exit code because chaos failures are expected!
-const testProcess = spawnSync('npx', ['playwright', 'test'], {
+const testProcess = spawnSync('npx', ['playwright', 'test', 'benchmark/tests/checkout.spec.ts'], {
   shell: true,
   stdio: 'inherit',
   env: {

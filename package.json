@@ -6,11 +6,18 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test:unit": "tsx tests/unit/core.test.ts",
+    "test:guardrail": "tsx tests/unit/guardrail.test.ts",
     "test:baseline": "playwright test",
     "demo:refactor": "tsx scripts/run-day1-demo.ts rename-testid",
     "demo:bug": "tsx scripts/run-day1-demo.ts api-500",
     "demo:crash": "tsx scripts/run-day1-demo.ts js-crash",
-    "demo:assertion": "tsx scripts/run-day1-demo.ts wrong-total"
+    "demo:assertion": "tsx scripts/run-day1-demo.ts wrong-total",
+    "heal:refactor": "tsx scripts/run-day2-demo.ts rename-testid",
+    "heal:button": "tsx scripts/run-day2-demo.ts rename-button",
+    "heal:input": "tsx scripts/run-day2-demo.ts change-input-id",
+    "heal:wrap": "tsx scripts/run-day2-demo.ts wrap-dom",
+    "heal:deleted": "tsx scripts/run-day2-demo.ts delete-pay-btn",
+    "heal:bug": "tsx scripts/run-day2-demo.ts wrong-total"
   },
   "dependencies": {
     "zod": "^3.24.2"
