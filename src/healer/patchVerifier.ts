@@ -6,6 +6,59 @@ import { HealingOutcomeSchema, type HealingOutcome } from '../schemas/healing.js
 import { proposeLocatorPatch } from './ollamaClient.js';
 import { validateAstPatch } from '../guardrail/astGuardrail.js';
 
+export interface SafeWorkspacePathResult {
+  ok: true;
+  absPath: string;
+  posixRelative: string;
+}
+
+export interface SafeWorkspacePathError {
+  ok: false;
+  error: string;
+}
+
+/**
+ * Validates that a target file path is safely contained within workspaceRoot and is a valid TypeScript file.
+ */
+export function resolveSafeWorkspacePath(
+  workspaceRoot: string,
+  relativePath: string
+): SafeWorkspacePathResult | SafeWorkspacePathError {
+  if (!relativePath || relativePath.includes('\0')) {
+    return { ok: false, error: 'Invalid file path: empty or contains null bytes' };
+  }
+
+  const resolvedRoot = path.resolve(workspaceRoot);
+  const resolvedTarget = path.resolve(resolvedRoot, relativePath);
+  const rel = path.relative(resolvedRoot, resolvedTarget);
+
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, error: `Path traversal or outside workspace: ${relativePath}` };
+  }
+
+  const posixRelative = rel.replace(/\\/g, '/');
+
+  // Reject .git, node_modules, or non-.ts files
+  if (
+    posixRelative.startsWith('.git/') ||
+    posixRelative.includes('/.git/') ||
+    posixRelative.startsWith('node_modules/') ||
+    posixRelative.includes('/node_modules/') ||
+    !posixRelative.endsWith('.ts')
+  ) {
+    return {
+      ok: false,
+      error: `Access denied for path (must be a workspace .ts file, not .git or node_modules): ${posixRelative}`,
+    };
+  }
+
+  return {
+    ok: true,
+    absPath: resolvedTarget,
+    posixRelative,
+  };
+}
+
 /**
  * Scans benchmark/tests/ for all *.spec.ts files that import the target file's base module.
  */
@@ -57,7 +110,7 @@ export function createUnifiedPatch(
   const originalLines = originalContent.split(/\r?\n/);
   const patchedLines = patchedContent.split(/\r?\n/);
 
-  // Find the changed line (assuming single contiguous block or single line edit)
+  // Find the changed line
   let changeStart = -1;
   for (let i = 0; i < Math.max(originalLines.length, patchedLines.length); i++) {
     if (originalLines[i] !== patchedLines[i]) {
@@ -91,6 +144,223 @@ export function createUnifiedPatch(
   }
 
   return header + hunkLines.join('\n') + '\n';
+}
+
+export interface VerifyCandidatePatchParams {
+  targetFile: string;
+  oldSnippet: string;
+  newSnippet: string;
+  chaosMode: string;
+  workspaceRoot: string;
+  emitPatch?: boolean;
+}
+
+export interface PatchVerificationResult {
+  verified: boolean;
+  status: 'HEALED' | 'BLOCKED_BY_AST' | 'REJECTED_BY_VERIFIER';
+  targetFile: string;
+  blastRadiusSpecs: string[];
+  violations: string[];
+  patchPath: string | null;
+  unifiedDiff: string | null;
+  reasoning: string;
+}
+
+/**
+ * Reusable, safe, in-memory patch verifier against Playwright blast-radius specs.
+ */
+export function verifyCandidatePatch(params: VerifyCandidatePatchParams): PatchVerificationResult {
+  const { targetFile, oldSnippet, newSnippet, chaosMode, workspaceRoot, emitPatch } = params;
+
+  // 1) Validate targetFile via resolveSafeWorkspacePath
+  const pathCheck = resolveSafeWorkspacePath(workspaceRoot, targetFile);
+  if (!pathCheck.ok) {
+    return {
+      verified: false,
+      status: 'REJECTED_BY_VERIFIER',
+      targetFile,
+      blastRadiusSpecs: [],
+      violations: [pathCheck.error],
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: pathCheck.error,
+    };
+  }
+
+  const { absPath, posixRelative } = pathCheck;
+
+  // 2) Verify file exists on disk, oldSnippet non-empty, differs from newSnippet, occurs exactly once
+  if (!fs.existsSync(absPath)) {
+    const err = `Target file does not exist: ${posixRelative}`;
+    return {
+      verified: false,
+      status: 'REJECTED_BY_VERIFIER',
+      targetFile: posixRelative,
+      blastRadiusSpecs: [],
+      violations: [err],
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: err,
+    };
+  }
+
+  const originalContent = fs.readFileSync(absPath, 'utf-8');
+
+  if (!oldSnippet || oldSnippet.trim() === '') {
+    const err = 'oldSnippet must not be empty';
+    return {
+      verified: false,
+      status: 'BLOCKED_BY_AST',
+      targetFile: posixRelative,
+      blastRadiusSpecs: [],
+      violations: [err],
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: err,
+    };
+  }
+
+  if (oldSnippet.trim() === newSnippet.trim()) {
+    const err = 'newSnippet must differ from oldSnippet';
+    return {
+      verified: false,
+      status: 'BLOCKED_BY_AST',
+      targetFile: posixRelative,
+      blastRadiusSpecs: [],
+      violations: [err],
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: err,
+    };
+  }
+
+  const occurrences = originalContent.split(oldSnippet).length - 1;
+  if (occurrences !== 1) {
+    const err = `Target snippet must occur exactly once in target file (found ${occurrences})`;
+    return {
+      verified: false,
+      status: 'BLOCKED_BY_AST',
+      targetFile: posixRelative,
+      blastRadiusSpecs: [],
+      violations: [err],
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: err,
+    };
+  }
+
+  // 3) Build patchedContent and run AST guardrail
+  const patchedContent = originalContent.replace(oldSnippet, newSnippet);
+  const astResult = validateAstPatch(originalContent, patchedContent, posixRelative);
+  if (!astResult.passed) {
+    return {
+      verified: false,
+      status: 'BLOCKED_BY_AST',
+      targetFile: posixRelative,
+      blastRadiusSpecs: [],
+      violations: astResult.violations,
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: `AST guardrail rejected patch: ${astResult.violations.join('; ')}`,
+    };
+  }
+
+  // 4) Compute blastRadiusSpecs
+  const blastRadiusSpecs = findBlastRadiusSpecs(posixRelative, workspaceRoot);
+  if (blastRadiusSpecs.length === 0) {
+    const err = 'No dependent Playwright spec files cover this target file.';
+    return {
+      verified: false,
+      status: 'REJECTED_BY_VERIFIER',
+      targetFile: posixRelative,
+      blastRadiusSpecs: [],
+      violations: [err],
+      patchPath: null,
+      unifiedDiff: null,
+      reasoning: err,
+    };
+  }
+
+  // 5) Safe temporary apply & silent Playwright execution
+  let verificationPassed = false;
+  let verificationOutput = '';
+
+  try {
+    fs.writeFileSync(absPath, patchedContent, 'utf-8');
+
+    const playResult = spawnSync(
+      'npx',
+      ['playwright', 'test', ...blastRadiusSpecs, '--reporter=list'],
+      {
+        cwd: workspaceRoot,
+        shell: process.platform === 'win32',
+        stdio: 'pipe',
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          CHAOS_MODE: chaosMode,
+        },
+      }
+    );
+
+    verificationPassed = playResult.status === 0;
+    verificationOutput = (playResult.stdout || '') + (playResult.stderr || '');
+  } finally {
+    fs.writeFileSync(absPath, originalContent, 'utf-8');
+  }
+
+  // 6) If Playwright exits 0
+  if (verificationPassed) {
+    const unifiedDiff = createUnifiedPatch(posixRelative, originalContent, patchedContent);
+    let patchPath: string | null = null;
+
+    if (emitPatch === true) {
+      if (!/^[a-zA-Z0-9_-]+$/.test(chaosMode)) {
+        return {
+          verified: false,
+          status: 'REJECTED_BY_VERIFIER',
+          targetFile: posixRelative,
+          blastRadiusSpecs,
+          violations: [`Invalid chaosMode for patch filename: "${chaosMode}"`],
+          patchPath: null,
+          unifiedDiff,
+          reasoning: `Invalid chaosMode for patch emission: "${chaosMode}"`,
+        };
+      }
+
+      const patchesDir = path.resolve(workspaceRoot, '.veriheal', 'patches');
+      if (!fs.existsSync(patchesDir)) {
+        fs.mkdirSync(patchesDir, { recursive: true });
+      }
+
+      patchPath = `.veriheal/patches/${chaosMode}.patch`;
+      const absPatchPath = path.resolve(workspaceRoot, patchPath);
+      fs.writeFileSync(absPatchPath, unifiedDiff, 'utf-8');
+    }
+
+    return {
+      verified: true,
+      status: 'HEALED',
+      targetFile: posixRelative,
+      blastRadiusSpecs,
+      violations: [],
+      patchPath,
+      unifiedDiff,
+      reasoning: 'Patch verified successfully against blast-radius specs.',
+    };
+  }
+
+  // 7) If Playwright exits non-zero
+  return {
+    verified: false,
+    status: 'REJECTED_BY_VERIFIER',
+    targetFile: posixRelative,
+    blastRadiusSpecs,
+    violations: [],
+    patchPath: null,
+    unifiedDiff: null,
+    reasoning: `Verification failed on blast-radius specs: ${verificationOutput.slice(0, 600)}`,
+  };
 }
 
 /**
@@ -138,132 +408,27 @@ export async function runHealerPipeline(
     });
   }
 
-  const absTarget = path.resolve(workspaceRoot, proposal.targetFile);
-  if (!fs.existsSync(absTarget)) {
-    return HealingOutcomeSchema.parse({
-      chaosMode,
-      verdict,
-      status: 'NO_CANDIDATE',
-      mode: proposal.mode,
-      targetFile: proposal.targetFile,
-      oldSnippet: proposal.oldSnippet,
-      newSnippet: proposal.newSnippet,
-      patchPath: null,
-      blastRadiusSpecs: [],
-      violations: [`Target file does not exist: ${proposal.targetFile}`],
-      reasoning: `Target file ${proposal.targetFile} could not be resolved on disk.`,
-    });
-  }
-
-  const originalContent = fs.readFileSync(absTarget, 'utf-8');
-
-  // Gate 3 — Exact Single-Match Safety Check
-  const occurrences = originalContent.split(proposal.oldSnippet).length - 1;
-  if (occurrences !== 1) {
-    const violation = `Target snippet must occur exactly once in target file (found ${occurrences})`;
-    return HealingOutcomeSchema.parse({
-      chaosMode,
-      verdict,
-      status: 'BLOCKED_BY_AST',
-      mode: proposal.mode,
-      targetFile: proposal.targetFile,
-      oldSnippet: proposal.oldSnippet,
-      newSnippet: proposal.newSnippet,
-      patchPath: null,
-      blastRadiusSpecs: [],
-      violations: [violation],
-      reasoning: violation,
-    });
-  }
-
-  // Gate 4 — AST Guardrail
-  const patchedContent = originalContent.replace(proposal.oldSnippet, proposal.newSnippet);
-  const astResult = validateAstPatch(originalContent, patchedContent, proposal.targetFile);
-  if (!astResult.passed) {
-    return HealingOutcomeSchema.parse({
-      chaosMode,
-      verdict,
-      status: 'BLOCKED_BY_AST',
-      mode: proposal.mode,
-      targetFile: proposal.targetFile,
-      oldSnippet: proposal.oldSnippet,
-      newSnippet: proposal.newSnippet,
-      patchPath: null,
-      blastRadiusSpecs: [],
-      violations: astResult.violations,
-      reasoning: `AST guardrail rejected patch: ${astResult.violations.join('; ')}`,
-    });
-  }
-
-  // Gate 5 — Safe Apply & Blast-Radius Verification (No Git Worktrees)
-  const blastRadiusSpecs = findBlastRadiusSpecs(proposal.targetFile, workspaceRoot);
-
-  let verificationPassed = false;
-  let verificationOutput = '';
-
-  try {
-    fs.writeFileSync(absTarget, patchedContent, 'utf-8');
-
-    // Run Playwright with --reporter=list so forensicReporter is not invoked
-    const playResult = spawnSync(
-      'npx',
-      ['playwright', 'test', ...blastRadiusSpecs, '--reporter=list'],
-      {
-        cwd: workspaceRoot,
-        shell: true,
-        encoding: 'utf-8',
-        env: {
-          ...process.env,
-          CHAOS_MODE: chaosMode,
-        },
-      }
-    );
-
-    verificationPassed = playResult.status === 0;
-    verificationOutput = (playResult.stdout || '') + (playResult.stderr || '');
-  } finally {
-    // ALWAYS restore originalContent byte-for-byte
-    fs.writeFileSync(absTarget, originalContent, 'utf-8');
-  }
-
-  // Gate 6 — Emit Verified Patch
-  if (verificationPassed) {
-    const patchesDir = path.resolve(workspaceRoot, '.veriheal', 'patches');
-    if (!fs.existsSync(patchesDir)) {
-      fs.mkdirSync(patchesDir, { recursive: true });
-    }
-
-    const patchPath = `.veriheal/patches/${chaosMode}.patch`;
-    const absPatchPath = path.resolve(workspaceRoot, patchPath);
-    const unifiedDiff = createUnifiedPatch(proposal.targetFile, originalContent, patchedContent);
-    fs.writeFileSync(absPatchPath, unifiedDiff, 'utf-8');
-
-    return HealingOutcomeSchema.parse({
-      chaosMode,
-      verdict,
-      status: 'HEALED',
-      mode: proposal.mode,
-      targetFile: proposal.targetFile,
-      oldSnippet: proposal.oldSnippet,
-      newSnippet: proposal.newSnippet,
-      patchPath,
-      blastRadiusSpecs,
-      violations: [],
-      reasoning: proposal.reasoning,
-    });
-  }
+  // Delegate Gates 3–6 to reusable verifyCandidatePatch
+  const verification = verifyCandidatePatch({
+    targetFile: proposal.targetFile,
+    oldSnippet: proposal.oldSnippet,
+    newSnippet: proposal.newSnippet,
+    chaosMode,
+    workspaceRoot,
+    emitPatch: true,
+  });
 
   return HealingOutcomeSchema.parse({
     chaosMode,
     verdict,
-    status: 'REJECTED_BY_VERIFIER',
+    status: verification.status,
     mode: proposal.mode,
-    targetFile: proposal.targetFile,
+    targetFile: verification.targetFile,
     oldSnippet: proposal.oldSnippet,
     newSnippet: proposal.newSnippet,
-    patchPath: null,
-    blastRadiusSpecs,
-    violations: [],
-    reasoning: `Verification failed on blast-radius specs: ${verificationOutput.slice(0, 300)}`,
+    patchPath: verification.patchPath,
+    blastRadiusSpecs: verification.blastRadiusSpecs,
+    violations: verification.violations,
+    reasoning: verification.verified ? proposal.reasoning : verification.reasoning,
   });
 }

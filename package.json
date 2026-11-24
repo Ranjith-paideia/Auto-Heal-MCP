@@ -17,9 +17,14 @@
     "heal:input": "tsx scripts/run-day2-demo.ts change-input-id",
     "heal:wrap": "tsx scripts/run-day2-demo.ts wrap-dom",
     "heal:deleted": "tsx scripts/run-day2-demo.ts delete-pay-btn",
-    "heal:bug": "tsx scripts/run-day2-demo.ts wrong-total"
+    "heal:bug": "tsx scripts/run-day2-demo.ts wrong-total",
+    "mcp:start": "tsx src/mcp/server.ts",
+    "test:mcp": "tsx tests/mcp.verify.ts",
+    "eval": "tsx benchmark/run-eval.ts",
+    "eval:offline": "tsx benchmark/run-eval.ts --offline"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {

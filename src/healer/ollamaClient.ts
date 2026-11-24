@@ -197,35 +197,38 @@ export async function proposeLocatorPatch(
   const { targetFile, failingLine, receiverPrefix } = context;
 
   // 2. Read configuration from environment variables
+  const isOffline = process.env.VERIHEAL_OFFLINE === '1' || process.env.VERIHEAL_OFFLINE === 'true';
   const ollamaBaseUrl = (process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1').replace(/\/+$/, '');
   const ollamaModel = process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b';
 
   let canUseOllama = false;
 
-  // 3. Health & Model Availability Check
-  try {
-    const modelsRes = await fetch(`${ollamaBaseUrl}/models`, {
-      method: 'GET',
-      signal: AbortSignal.timeout(2000),
-    });
+  // 3. Health & Model Availability Check (skip if VERIHEAL_OFFLINE is set)
+  if (!isOffline) {
+    try {
+      const modelsRes = await fetch(`${ollamaBaseUrl}/models`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(2000),
+      });
 
-    if (modelsRes.ok) {
-      const data = (await modelsRes.json()) as { data?: Array<{ id: string }> };
-      if (Array.isArray(data?.data)) {
-        const hasModel = data.data.some(
-          (m) =>
-            m.id === ollamaModel ||
-            m.id.startsWith(ollamaModel + ':') ||
-            m.id.split(':')[0] === ollamaModel.split(':')[0]
-        );
-        if (hasModel) {
-          canUseOllama = true;
+      if (modelsRes.ok) {
+        const data = (await modelsRes.json()) as { data?: Array<{ id: string }> };
+        if (Array.isArray(data?.data)) {
+          const hasModel = data.data.some(
+            (m) =>
+              m.id === ollamaModel ||
+              m.id.startsWith(ollamaModel + ':') ||
+              m.id.split(':')[0] === ollamaModel.split(':')[0]
+          );
+          if (hasModel) {
+            canUseOllama = true;
+          }
         }
       }
+    } catch {
+      // Ollama not running or unreachable
+      canUseOllama = false;
     }
-  } catch {
-    // Ollama not running or unreachable
-    canUseOllama = false;
   }
 
   // 4. Live Ollama Single-Shot Path
@@ -318,7 +321,7 @@ INSTRUCTIONS:
         }
       }
     } catch (err) {
-      console.warn(`[Auto-Heal-MCP] Ollama live heal failed or timed out. Falling back to deterministic ARIA matcher. Reason:`, err);
+      console.error(`[Auto-Heal-MCP] Ollama live heal failed or timed out. Falling back to deterministic ARIA matcher. Reason:`, err);
     }
   }
 

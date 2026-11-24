@@ -1,0 +1,55 @@
+name: Auto-Heal-MCP CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium with system dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Typecheck TypeScript
+        run: npm run typecheck
+
+      - name: Run Core Unit Tests
+        run: npm run test:unit
+
+      - name: Run AST Guardrail Unit Tests
+        run: npm run test:guardrail
+
+      - name: Run Playwright Baseline Tests
+        run: npm run test:baseline
+
+      - name: Run End-to-End MCP Stdio Verification
+        run: npm run test:mcp
+
+      - name: Run 8-Scenario Chaos Benchmark (Offline Gate)
+        run: npm run eval:offline
+
+      - name: Upload Evaluation Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: veriheal-eval-artifacts
+          path: |
+            .veriheal/eval-scorecard.json
+            .veriheal/patches/
