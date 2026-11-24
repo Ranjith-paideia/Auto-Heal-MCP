@@ -1,0 +1,24 @@
+{
+  "name": "auto-heal-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Auto-Heal-MCP Day 1 Foundation",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:unit": "tsx tests/unit/core.test.ts",
+    "test:baseline": "playwright test",
+    "demo:refactor": "tsx scripts/run-day1-demo.ts rename-testid",
+    "demo:bug": "tsx scripts/run-day1-demo.ts api-500",
+    "demo:crash": "tsx scripts/run-day1-demo.ts js-crash",
+    "demo:assertion": "tsx scripts/run-day1-demo.ts wrong-total"
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.1",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
